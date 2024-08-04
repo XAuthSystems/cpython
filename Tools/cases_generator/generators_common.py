@@ -5,6 +5,7 @@ from analyzer import (
     Instruction,
     Uop,
     Properties,
+    StackItem,
 )
 from cwriter import CWriter
 from typing import Callable, Mapping, TextIO, Iterator
@@ -22,6 +23,15 @@ def root_relative_path(filename: str) -> str:
     except ValueError:
         # Not relative to root, just return original path.
         return filename
+
+
+def type_and_null(var: StackItem) -> tuple[str, str]:
+    if var.type:
+        return var.type, "NULL"
+    elif var.is_array():
+        return "_PyStackRef *", "NULL"
+    else:
+        return "_PyStackRef", "PyStackRef_NULL"
 
 
 def write_header(
@@ -82,19 +92,26 @@ def replace_error(
     next(tkn_iter)  # RPAREN
     next(tkn_iter)  # Semi colon
     out.emit(") ")
-    c_offset = stack.peek_offset.to_c()
+    c_offset = stack.peek_offset()
     try:
         offset = -int(c_offset)
-        close = ";\n"
     except ValueError:
-        offset = None
-        out.emit(f"{{ stack_pointer += {c_offset}; ")
-        close = "; }\n"
-    out.emit("goto ")
-    if offset:
-        out.emit(f"pop_{offset}_")
-    out.emit(label)
-    out.emit(close)
+        offset = -1
+    if offset > 0:
+        out.emit(f"goto pop_{offset}_")
+        out.emit(label)
+        out.emit(";\n")
+    elif offset == 0:
+        out.emit("goto ")
+        out.emit(label)
+        out.emit(";\n")
+    else:
+        out.emit("{\n")
+        stack.flush_locally(out)
+        out.emit("goto ")
+        out.emit(label)
+        out.emit(";\n")
+        out.emit("}\n")
 
 
 def replace_error_no_pop(
@@ -126,7 +143,7 @@ def replace_decrefs(
     for var in uop.stack.inputs:
         if var.name == "unused" or var.name == "null" or var.peek:
             continue
-        if var.size != "1":
+        if var.size:
             out.emit(f"for (int _i = {var.size}; --_i >= 0;) {{\n")
             out.emit(f"PyStackRef_CLOSE({var.name}[_i]);\n")
             out.emit("}\n")
